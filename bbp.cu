@@ -45,15 +45,14 @@ unsigned __int128 redc(unsigned __int128 val, unsigned __int128 n, unsigned __in
 // This is done using left-to-right exponentiation by squaring and Montgomery multiplication.
 __device__
 double mod_pow16(uint64_t e, uint64_t n) {
-    // 2^64 - n ^ -1
+    // 2^64 - n^-1
     unsigned __int128 neg_inv = ~mult_inv(n) + 1;
 
-    unsigned __int128 mont_res = 1;
-    mont_res <<= 64;
-    mont_res %= n;
-    unsigned __int128 mont_16 = 16;
-    mont_16 <<= 64;
-    mont_16 %= n;
+    // 2^128 mod n
+    // (a * 2^64) mod n = redc(a * (2^128 mod n))
+    unsigned __int128 mont_2_128 = std::numeric_limits<unsigned __int128>::max() % n + 1;
+    unsigned __int128 mont_res = redc(mont_2_128, n, neg_inv);
+    unsigned __int128 mont_16 = redc(mont_2_128 << 4, n, neg_inv);
 
     // Bit mask
     uint64_t mask = 1;
