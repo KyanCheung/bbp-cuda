@@ -1,5 +1,4 @@
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -34,18 +33,20 @@ unsigned __int128 mod_r(unsigned __int128 n) {
 }
 
 // Montgomery reduction
+// Computes val * 2 ^ -64 (mod n)
 __device__
 unsigned __int128 redc(unsigned __int128 val, unsigned __int128 n, unsigned __int128 neg_inv) {
     unsigned __int128 m = mod_r(mod_r(val) * neg_inv);
     unsigned __int128 t = (val + m * n) >> 64;
     return t >= n ? t - n : t;
 }
+
 // Kernel that does exponentiation mod n (for n < 2^64)
 // This is done using left-to-right exponentiation by squaring and Montgomery multiplication.
 __device__
 double mod_pow16(uint64_t e, uint64_t n) {
     // 2^64 - n ^ -1
-    unsigned __int128 neg_inv = 0xffffffffffffffff - mult_inv(n) + 1;
+    unsigned __int128 neg_inv = ~mult_inv(n) + 1;
 
     unsigned __int128 mont_res = 1;
     mont_res <<= 64;
@@ -67,7 +68,7 @@ double mod_pow16(uint64_t e, uint64_t n) {
     while (mask) {
         // Square mont_res
         mont_res = redc(mont_res * mont_res, n, neg_inv);
-        
+
         // Multiply by mont_16 if e & mask
         if (e & mask) {
             mont_res = redc(mont_res * mont_16, n, neg_inv);
@@ -103,7 +104,7 @@ void bbp(uint64_t digit, double *partial_sums, int diff, int offset, int digit_s
             // mod 1 to reduce error
             if (partial_sum >= 1.0) {partial_sum -= 1.0;}
         } else {
-            partial_sum += pow(16.0, double(exponent)) / denom;
+            partial_sum += 1 / (denom * double(1ll << (-4 * exponent)));
         }
     }
 
@@ -129,6 +130,7 @@ double fadd_mod1(double x, double y) {
     return res > 1 ? res - 1 : res;
 }
 
+// Floor modulo 1 (ensures output is positive)
 double fmod1(double x) {
     return x - floor(x);
 }
@@ -149,6 +151,7 @@ int main() {
     int mult[terms] = {512, 256, 128, -8, -16, -8, 1, -1};
     int diff[terms] = {8, 6, 12, 6, 12, 8, 6, 12};
     int offset[terms] = {1, 1, 3, 3, 7, 5, 5, 11};
+    // We are effectively calculating 256*pi and thus need to "shift" the digit we are looking at
     int digit_shift = 2;
 
     double temp;
@@ -187,7 +190,7 @@ int main() {
 
     // Stop timer
     auto stop = std::chrono::high_resolution_clock::now();
-    
+
     std::chrono::duration<float> duration = stop - start;
 
     std::cout << "Time taken: " << duration.count() << " seconds" << std::endl;
