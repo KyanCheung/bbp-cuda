@@ -7,7 +7,7 @@
 
 // Thread block size
 #define BLOCK_SIZE 512
-#define GRID_SIZE 144
+#define GRID_SIZE 48*3*16
 #define LENGTH (BLOCK_SIZE * GRID_SIZE)
 
 // Inverse of a modulo 2^64
