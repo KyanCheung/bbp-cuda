@@ -26,19 +26,28 @@ uint64_t mult_inv(uint64_t a) {
     return x4;
 }
 
-// Modulo 2^64
+// 64 x 64 -> 128 bit multiplication
 __device__
-unsigned __int128 mod_r(unsigned __int128 n) {
-    return (uint64_t)n;
+unsigned __int128 mul_wide_u64(uint64_t a, uint64_t b) {
+    unsigned __int128 res = __umul64hi(a, b);
+    res <<= 64;
+    res += a * b;
+    return res;
 }
 
 // Montgomery reduction
 // Computes val * 2 ^ -64 (mod denom)
-__device__
-unsigned __int128 redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) {
-    unsigned __int128 m = mod_r(mod_r(val) * neg_inv);
-    uint64_t t = (val + m * denom) >> 64;
-    return t >= denom ? t - denom : t;
+// Requires val < denom * 2^64 (which should be the case for denom < 2^62)
+__device__ 
+uint64_t redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) { 
+    uint64_t val_high = val >> 64;
+    uint64_t val_low = val;
+    uint64_t m = val_low * neg_inv;
+    // Equivalent to (m * denom + high) >> 64 but without 128-bit operations
+    uint64_t t = __umul64hi(m, denom) + val_high;
+    if (val_low != 0) {t++;} // bit carry from lower 64 bits if necessary
+    // t now ranges from 0 to 2*denom-1
+    return t;
 }
 
 // Computes fractional part of 16^e / denom (for n < 2^60) and stores in uint64_t
@@ -52,26 +61,21 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
     // 2^128 mod n
     // (a * 2^64) mod n = redc(a * (2^128 mod n))
     uint64_t mont_2_128 = std::numeric_limits<unsigned __int128>::max() % denom + 1;
-    unsigned __int128 mont_res = redc(mont_2_128, denom, neg_inv);
+    uint64_t mont_res = redc(mont_2_128, denom, neg_inv);
     uint64_t mont_16 = redc(mont_2_128 << 4, denom, neg_inv);
 
     // Bit mask
     uint64_t mask = 1;
-    mask <<= 63;
-
-    // Keep going until bit(s) of e are masked
-    while (!(mask & e)) {
-        mask >>= 1;
-    }
+    mask <<= (63 - __clzll(e));
 
     // Keep exponentiating until mask = 0
     while (mask) {
         // Square mont_res
-        mont_res = redc(mont_res * mont_res, denom, neg_inv);
+        mont_res = redc(mul_wide_u64(mont_res, mont_res), denom, neg_inv);
 
         // Multiply by mont_16 if e & mask
         if (e & mask) {
-            mont_res = redc(mont_res * mont_16, denom, neg_inv);
+            mont_res = redc(mul_wide_u64(mont_res, mont_16), denom, neg_inv);
         }
 
         mask >>= 1;
@@ -79,7 +83,7 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
     // Essentially we want res * 2^64 / n (mod 2^64)
     // We perform Montmogery reduction, without the division by 2^64 step
     // Equals 0 mod 2^64 and mont_res mod n => equals res*2^64 mod (n*2^64)
-    unsigned __int128 m = mod_r(mod_r(mont_res) * neg_inv);
+    unsigned __int128 m = uint64_t(uint64_t(mont_res) * neg_inv);
     unsigned __int128 numerator = mont_res + m * denom;
     // To round to nearest integer, add n/2 to the numerator
     return (numerator + (denom >> 1)) / denom;
