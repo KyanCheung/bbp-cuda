@@ -33,26 +33,27 @@ unsigned __int128 mod_r(unsigned __int128 n) {
 }
 
 // Montgomery reduction
-// Computes val * 2 ^ -64 (mod n)
+// Computes val * 2 ^ -64 (mod denom)
 __device__
-unsigned __int128 redc(unsigned __int128 val, unsigned __int128 n, unsigned __int128 neg_inv) {
+unsigned __int128 redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) {
     unsigned __int128 m = mod_r(mod_r(val) * neg_inv);
-    unsigned __int128 t = (val + m * n) >> 64;
-    return t >= n ? t - n : t;
+    uint64_t t = (val + m * denom) >> 64;
+    return t >= denom ? t - denom : t;
 }
 
-// Kernel that does exponentiation mod n (for n < 2^64)
+// Computes fractional part of 16^e / denom (for n < 2^60) and stores in uint64_t
 // This is done using left-to-right exponentiation by squaring and Montgomery multiplication.
+// Requires denom coprime to 2^64 (i.e. denom odd)
 __device__
-double mod_pow16(uint64_t e, uint64_t n) {
+uint64_t div_pow16(uint64_t e, uint64_t denom) {
     // 2^64 - n^-1
-    unsigned __int128 neg_inv = ~mult_inv(n) + 1;
+    uint64_t neg_inv = ~mult_inv(denom) + 1;
 
     // 2^128 mod n
     // (a * 2^64) mod n = redc(a * (2^128 mod n))
-    unsigned __int128 mont_2_128 = std::numeric_limits<unsigned __int128>::max() % n + 1;
-    unsigned __int128 mont_res = redc(mont_2_128, n, neg_inv);
-    unsigned __int128 mont_16 = redc(mont_2_128 << 4, n, neg_inv);
+    uint64_t mont_2_128 = std::numeric_limits<unsigned __int128>::max() % denom + 1;
+    unsigned __int128 mont_res = redc(mont_2_128, denom, neg_inv);
+    uint64_t mont_16 = redc(mont_2_128 << 4, denom, neg_inv);
 
     // Bit mask
     uint64_t mask = 1;
@@ -66,44 +67,50 @@ double mod_pow16(uint64_t e, uint64_t n) {
     // Keep exponentiating until mask = 0
     while (mask) {
         // Square mont_res
-        mont_res = redc(mont_res * mont_res, n, neg_inv);
+        mont_res = redc(mont_res * mont_res, denom, neg_inv);
 
         // Multiply by mont_16 if e & mask
         if (e & mask) {
-            mont_res = redc(mont_res * mont_16, n, neg_inv);
+            mont_res = redc(mont_res * mont_16, denom, neg_inv);
         }
 
         mask >>= 1;
     }
-    // Reduce back and return
-    return redc(mont_res, n, neg_inv);
+    // Essentially we want res * 2^64 / n (mod 2^64)
+    // We perform Montmogery reduction, without the division by 2^64 step
+    // Equals 0 mod 2^64 and mont_res mod n => equals res*2^64 mod (n*2^64)
+    unsigned __int128 m = mod_r(mod_r(mont_res) * neg_inv);
+    unsigned __int128 numerator = mont_res + m * denom;
+    // To round to nearest integer, add n/2 to the numerator
+    return (numerator + (denom >> 1)) / denom;
 }
 
 __global__
-void bbp(uint64_t digit, double *partial_sums, int diff, int offset, int digit_shift) {
+void bbp(uint64_t digit, uint64_t *partial_sums, int diff, int offset, int digit_shift) {
     // Have elements in the same block differ by gridDim to maximise identical mod_pow calls
     int index = threadIdx.x * GRID_SIZE + blockIdx.x;
-    __shared__ double shared_sums[BLOCK_SIZE];
+    __shared__ uint64_t shared_sums[BLOCK_SIZE];
 
-    // Multiply pi by 16^n and calculate pi*16^n mod 1
+    // Multiply pi by 16^n and calculate the integer part of pi*16^n*2^64 mod 2^64
+    // This has the same effect as calcuating the fractional part of pi*16^n
+    // and truncating the answer to 16 hex digits
     uint64_t n = digit - 1 - digit_shift;
     int64_t exponent;
-    double modulo;
-    double denom;
-    double partial_sum = 0;
+    uint64_t denom;
+    uint64_t partial_sum = 0;
 
-    for (uint64_t k = index; k < (n + 14) / 3; k += LENGTH) {
+    for (uint64_t k = index; k < (n + 16) / 3; k += LENGTH) {
         exponent = n - 3 * k;
         denom = diff * k + offset;
         if (exponent > 0) {
-            // Compute 16^(n-3k) (mod denom) / denom
-            modulo = mod_pow16(exponent, denom);
-            partial_sum += modulo / denom;
-
-            // mod 1 to reduce error
-            if (partial_sum >= 1.0) {partial_sum -= 1.0;}
+            // Compute fractional part of 16^(n-3k) / denom
+            partial_sum += div_pow16(exponent, denom);
         } else {
-            partial_sum += 1 / (denom * double(1ll << (-4 * exponent)));
+            unsigned __int128 res = 1;
+            // res = 16^(-exponent) * 2^64
+            res <<= (64 + 4 * exponent);
+            // To round to nearest integer, add denom/2 to the numerator
+            partial_sum += (res + (denom >> 1)) / denom;
         }
     }
 
@@ -115,23 +122,11 @@ void bbp(uint64_t digit, double *partial_sums, int diff, int offset, int digit_s
     for (int i = BLOCK_SIZE >> 1; i > 0; i >>= 1) {
         if (threadIdx.x < i) {
             shared_sums[threadIdx.x] += shared_sums[threadIdx.x + i];
-            if (shared_sums[threadIdx.x] > 1) {shared_sums[threadIdx.x] -= 1;}
         }
         __syncthreads();
     }
 
     if (threadIdx.x == 0) {partial_sums[blockIdx.x] = shared_sums[0];}
-}
-
-// Addition modulo 1 (assuming x, y are positive)
-double fadd_mod1(double x, double y) {
-    double res = x + y;
-    return res > 1 ? res - 1 : res;
-}
-
-// Floor modulo 1 (ensures output is positive)
-double fmod1(double x) {
-    return x - floor(x);
 }
 
 int main() {
@@ -142,7 +137,7 @@ int main() {
     // Start timer:
     auto start = std::chrono::high_resolution_clock::now();
 
-    double *partial_sums;
+    uint64_t *partial_sums;
     cudaMallocManaged(&partial_sums, 8 * GRID_SIZE);
 
     // Data about BBP formula
@@ -153,8 +148,8 @@ int main() {
     // We are effectively calculating 256*pi and thus need to "shift" the digit we are looking at
     int digit_shift = 2;
 
-    double temp;
-    double res = 0;
+    uint64_t temp;
+    uint64_t res = 0;
 
     for (int i = 0; i < terms; ++i) {
         temp = 0;
@@ -167,30 +162,21 @@ int main() {
 
         // Sum partial sums to get the total of one sum
         for (int j = 0; j < GRID_SIZE; ++j) {
-            temp = fadd_mod1(temp, partial_sums[j]);
+            temp += partial_sums[j];
         }
         // Multiply by numerator and add to res
-        temp *= mult[i];
-        res += temp;
-        res = fmod1(res);
+        res += temp * mult[i];
     }
 
-    // To write res in hexadecimal, we multiply res by 2^64 (only affecting mantissa),
-    // then cast to uint64_t and convert that to hex, before padding.
-    std::stringstream hex_stream;
-    hex_stream << std::setfill('0') << std::setw(16);
-    hex_stream << std::hex << (uint64_t)(res * pow(2, 64)) << std::endl;
-
-    // We want to remove the last 2 digits as they are 0s
-    std::string hex_string = hex_stream.str();
-    hex_string.erase(14, 2);
-
-    std::cout << "Hex digits: " << hex_string << std::endl;
+    // We want to pad the output of res to 16 characters
+    // otherwise 0(s) in the most significant digit(s) disappear
+    std::cout << "Hex digits: " << std::setfill('0') << std::setw(16);
+    std::cout << std::hex << res << std::endl;
 
     // Stop timer
     auto stop = std::chrono::high_resolution_clock::now();
 
-    std::chrono::duration<float> duration = stop - start;
+    std::chrono::duration<double> duration = stop - start;
 
     std::cout << "Time taken: " << duration.count() << " seconds" << std::endl;
 
