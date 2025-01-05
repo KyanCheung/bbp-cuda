@@ -26,20 +26,11 @@ uint64_t mult_inv(uint64_t a) {
     return x4;
 }
 
-// 64 x 64 -> 128 bit multiplication
-__device__
-unsigned __int128 mul_wide_u64(uint64_t a, uint64_t b) {
-    unsigned __int128 res = __umul64hi(a, b);
-    res <<= 64;
-    res += a * b;
-    return res;
-}
-
 // Montgomery reduction
 // Computes val * 2 ^ -64 (mod denom)
 // Requires val < denom * 2^64 (which should be the case for denom < 2^62)
 __device__ 
-uint64_t redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) { 
+unsigned __int128 redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) { 
     uint64_t val_high = val >> 64;
     uint64_t val_low = val;
     uint64_t m = val_low * neg_inv;
@@ -71,7 +62,7 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
     // As in the first step res = 16 ^ (4 * e_masked) so mont_res = mont_pow_16
     uint64_t e_masked = (e & mask) >> p; // Get masked bits of e
     uint64_t mont_pow_16; // Montgomery form of 16 ^ (4 * e_masked)
-    uint64_t mont_res = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
+    unsigned __int128 mont_res = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
     mask >>= 4;
     p -= 4;
 
@@ -79,12 +70,12 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
     while (mask) {
         // Take mont_res to the power of 16
         for (int i = 0; i < 4; i++) {
-            mont_res = redc(mul_wide_u64(mont_res, mont_res), denom, neg_inv);
+            mont_res = redc(mont_res * mont_res, denom, neg_inv);
         }
 
         e_masked = (e & mask) >> p;
         mont_pow_16 = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
-        mont_res = redc(mul_wide_u64(mont_res, mont_pow_16), denom, neg_inv);
+        mont_res = redc(mont_res * mont_pow_16, denom, neg_inv);
 
         mask >>= 4;
         p -= 4;
