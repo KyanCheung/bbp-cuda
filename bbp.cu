@@ -7,7 +7,7 @@
 
 // Thread block size
 #define BLOCK_SIZE 512
-#define GRID_SIZE 48*3*16
+#define GRID_SIZE 48*3*8
 #define LENGTH (BLOCK_SIZE * GRID_SIZE)
 
 // Inverse of a modulo 2^64
@@ -51,7 +51,7 @@ uint64_t redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) {
 }
 
 // Computes fractional part of 16^e / denom (for n < 2^60) and stores in uint64_t
-// This is done using left-to-right exponentiation by squaring and Montgomery multiplication.
+// This is done using 16-ary exponentiation and Montgomery multiplication.
 // Requires denom coprime to 2^64 (i.e. denom odd)
 __device__
 uint64_t div_pow16(uint64_t e, uint64_t denom) {
@@ -60,25 +60,34 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
 
     // 2^128 mod n
     // (a * 2^64) mod n = redc(a * (2^128 mod n))
-    uint64_t mont_2_128 = std::numeric_limits<unsigned __int128>::max() % denom + 1;
-    uint64_t mont_res = redc(mont_2_128, denom, neg_inv);
-    uint64_t mont_16 = redc(mont_2_128 << 4, denom, neg_inv);
+    unsigned __int128 mont_2_128 = std::numeric_limits<unsigned __int128>::max() % denom + 1;
 
     // Bit mask
-    uint64_t mask = 1;
-    mask <<= (63 - __clzll(e));
+    int p = (63 - __clzll(e)) & 0x3c; // Round down (63 - __clzll(e)) to nearest multiple of 4
+    uint64_t mask = 0xf; // 1111 in base 2
+    mask <<= p;
+
+    // Unroll first step of loop
+    // As in the first step res = 16 ^ (4 * e_masked) so mont_res = mont_pow_16
+    uint64_t e_masked = (e & mask) >> p; // Get masked bits of e
+    uint64_t mont_pow_16; // Montgomery form of 16 ^ (4 * e_masked)
+    uint64_t mont_res = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
+    mask >>= 4;
+    p -= 4;
 
     // Keep exponentiating until mask = 0
     while (mask) {
-        // Square mont_res
-        mont_res = redc(mul_wide_u64(mont_res, mont_res), denom, neg_inv);
-
-        // Multiply by mont_16 if e & mask
-        if (e & mask) {
-            mont_res = redc(mul_wide_u64(mont_res, mont_16), denom, neg_inv);
+        // Take mont_res to the power of 16
+        for (int i = 0; i < 4; i++) {
+            mont_res = redc(mul_wide_u64(mont_res, mont_res), denom, neg_inv);
         }
 
-        mask >>= 1;
+        e_masked = (e & mask) >> p;
+        mont_pow_16 = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
+        mont_res = redc(mul_wide_u64(mont_res, mont_pow_16), denom, neg_inv);
+
+        mask >>= 4;
+        p -= 4;
     }
     // Essentially we want res * 2^64 / n (mod 2^64)
     // We perform Montmogery reduction, without the division by 2^64 step
