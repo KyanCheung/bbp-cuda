@@ -34,7 +34,7 @@ unsigned __int128 redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) 
     uint64_t val_high = val >> 64;
     uint64_t val_low = val;
     uint64_t m = val_low * neg_inv;
-    // Equivalent to (m * denom + high) >> 64 but without 128-bit operations
+    // Equivalent to (m * denom + val) >> 64 but without 128-bit operations
     uint64_t t = __umul64hi(m, denom) + val_high;
     if (val_low != 0) {t++;} // bit carry from lower 64 bits if necessary
     // t now ranges from 0 to 2*denom-1
@@ -42,7 +42,8 @@ unsigned __int128 redc(unsigned __int128 val, uint64_t denom, uint64_t neg_inv) 
 }
 
 // Computes fractional part of 16^e / denom (for n < 2^60) and stores in uint64_t
-// This is done using 16-ary exponentiation and Montgomery multiplication.
+// This is done by calculating 16^e modulo denom, multiplying by 2^64, and integer dividing.
+// Modular exponentiation is done using 16-ary exponentiation and Montgomery multiplication.
 // Requires denom coprime to 2^64 (i.e. denom odd)
 __device__
 uint64_t div_pow16(uint64_t e, uint64_t denom) {
@@ -68,11 +69,12 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
 
     // Keep exponentiating until mask = 0
     while (mask) {
-        // Take mont_res to the power of 16
+        // Take res to the power of 16
         for (int i = 0; i < 4; i++) {
             mont_res = redc(mont_res * mont_res, denom, neg_inv);
         }
 
+        // Multiply res by 16 ^ (e_masked)
         e_masked = (e & mask) >> p;
         mont_pow_16 = redc(mont_2_128 << (4 * e_masked), denom, neg_inv);
         mont_res = redc(mont_res * mont_pow_16, denom, neg_inv);
@@ -82,7 +84,7 @@ uint64_t div_pow16(uint64_t e, uint64_t denom) {
     }
     // Essentially we want res * 2^64 / n (mod 2^64)
     // We perform Montmogery reduction, without the division by 2^64 step
-    // Equals 0 mod 2^64 and mont_res mod n => equals res*2^64 mod (n*2^64)
+    // Numerator equals 0 mod 2^64 and mont_res mod n => equals res*2^64 mod (n*2^64)
     unsigned __int128 m = uint64_t(uint64_t(mont_res) * neg_inv);
     unsigned __int128 numerator = mont_res + m * denom;
     // To round to nearest integer, add n/2 to the numerator
@@ -103,6 +105,7 @@ void bbp(uint64_t digit, uint64_t *partial_sums, int diff, int offset, int digit
     uint64_t denom;
     uint64_t partial_sum = 0;
 
+    // Grid-stride loop
     for (uint64_t k = index; k < (n + 16) / 3; k += LENGTH) {
         exponent = n - 3 * k;
         denom = diff * k + offset;
@@ -119,7 +122,6 @@ void bbp(uint64_t digit, uint64_t *partial_sums, int diff, int offset, int digit
     }
 
     shared_sums[threadIdx.x] = partial_sum;
-
     __syncthreads();
 
     // Reduction - requires block size a power of 2
@@ -130,6 +132,7 @@ void bbp(uint64_t digit, uint64_t *partial_sums, int diff, int offset, int digit
         __syncthreads();
     }
 
+    // One thread in block writes to global memory
     if (threadIdx.x == 0) {partial_sums[blockIdx.x] = shared_sums[0];}
 }
 
