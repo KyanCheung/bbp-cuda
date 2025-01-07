@@ -24,12 +24,14 @@ Notably, `bbp-gpu` is 16.6x faster than GPUPi (in the 32b workload). While `bbp-
 
 My desktop's CPU/GPU configuration is a bit arbitrary. So, I additionally ran `bbp-gpu` on the fastest Nvidia consumer GPU (currently the 4090) via vast.ai, and compared them to the median benchmark time posted on [HWBot](https://hwbot.org/) leaderboards for the fastest consumer CPU (9950X) and GPU (4090) for y-cruncher and GPUPi respectively.
 
-| Size | y-cruncher (7950X) | GPUPi v3.2 (4090) | bbp-gpu (4090) |
+| Size | y-cruncher (9950X) | GPUPi v3.2 (4090) | bbp-gpu (4090) |
 | ---- | ------------------ | ----------------- | -------------- |
 | 1b   | 0.327              | 1.346             | 0.333          |
 | 10b  | 3.842              | -                 | 1.830          |
 | 32b  | -                  | 84.515            | 5.680          |
 | 100b | 41.908             | -                 | 18.131         |
+
+The 4090 is still slower at 1B due to overhead, but is up to 125% faster than the 9950X running y-cruncher, and `bbp-gpu` is also up to 14x faster than GPUPi v3.2.
 
 However, [this CUDA implementation](https://github.com/euphoricpoptarts/bbpCudaImplementation), which heavily utilises PTX, seems to outperform my implementation by about 80%.
 
